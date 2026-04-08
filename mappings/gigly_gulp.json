@@ -1,0 +1,24 @@
+{
+    "customer_name": "Gigly Gulp",
+    "customer_code": "CSGG03",
+    "description": "Mapping config for Gigly Gulp DC01 order files",
+    "column_map": {
+        "DocNo":        "ORDER_REF",
+        "DocDate":      "ORDER_DATE",
+        "DebtorCode":   "CUST_CODE",
+        "DebtorName":   "CUST_NAME",
+        "BranchCode":   "ADDRESS_NO",
+        "Location":     "ADDRESS1",
+        "ItemCode":     "PROD_CODE",
+        "Qty":          "ORIG_QTY_ORDERED",
+        "PackBy":       "ORIG_UOM_CODE",
+        "UnitPrice":    "AOPT_DEC_FIELD3",
+        "Discount":     "AOPT_DEC_FIELD4",
+        "BatchNo":      "LOT_NO",
+        "ProjNo":       "REMARKS2",
+        "PONo":         "CUST_PO",
+        "AccNo":        "AOPT_FIELD4",
+        "TaxCode":      "AOPT_FIELD5",
+        "Remarks":      "REMARKS"
+    }
+}
