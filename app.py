@@ -18,6 +18,7 @@ Dependencies:
 
 import tempfile
 from pathlib import Path
+from datetime import datetime
 
 import streamlit as st
 import pandas as pd
@@ -45,6 +46,9 @@ st.set_page_config(
 
 st.title("📦 WMS Order File Converter")
 st.caption("Convert customer Excel order files into WMS-ready CSV format.")
+
+if "export_payload" not in st.session_state:
+    st.session_state["export_payload"] = None
 
 def get_mappings_fingerprint():
     json_files = sorted(MAPPINGS_DIR.glob("*.json"))
@@ -240,35 +244,28 @@ if uploaded_file:
 
         if df_clean.empty:
             st.error("Nothing to export — all rows have validation errors.")
+            st.session_state["export_payload"] = None
         else:
             cols_ordered = [c for c in ALL_WMS_FIELDS if c in df_clean.columns]
-            csv_bytes    = df_clean[cols_ordered].to_csv(index=False, encoding="utf-8").encode("utf-8")
+            csv_bytes = df_clean[cols_ordered].to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
 
             st.info(
                 f"Ready to export **{len(df_clean)} valid rows** as WMS CSV. "
                 + (f"**{len(df_errors)} error rows** will be excluded." if len(df_errors) > 0 else "")
             )
 
-            from datetime import datetime
-            ts           = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_fname = f"wms_output_{customer_key}_{ts}.csv"
+            error_fname = f"wms_errors_{customer_key}_{ts}.csv"
+            err_csv = df_errors.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig") if not df_errors.empty else None
 
-            st.download_button(
-                label="⬇ Download WMS CSV",
-                data=csv_bytes,
-                file_name=output_fname,
-                mime="text/csv",
-                type="primary"
-            )
-
-            if not df_errors.empty:
-                err_csv = df_errors.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="⬇ Download error report",
-                    data=err_csv,
-                    file_name=f"wms_errors_{customer_key}_{ts}.csv",
-                    mime="text/csv"
-                )
+            # Keep export bytes in session so downloads remain available after reruns in deployed Streamlit.
+            st.session_state["export_payload"] = {
+                "output_fname": output_fname,
+                "csv_bytes": csv_bytes,
+                "error_fname": error_fname,
+                "err_csv": err_csv,
+            }
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -278,10 +275,22 @@ else:
     else:
         st.info("Fix config errors in mappings first, then upload a file.")
 
-import os
-st.write("cwd:", os.getcwd())
-st.write("mappings dir exists:", MAPPINGS_DIR.exists(), str(MAPPINGS_DIR))
-st.write("json files:", [p.name for p in MAPPINGS_DIR.glob("*.json")] if MAPPINGS_DIR.exists() else [])
+payload = st.session_state.get("export_payload")
+if payload:
+    st.download_button(
+        label="⬇ Download WMS CSV",
+        data=payload["csv_bytes"],
+        file_name=payload["output_fname"],
+        mime="text/csv",
+        type="primary",
+    )
+    if payload["err_csv"] is not None:
+        st.download_button(
+            label="⬇ Download error report",
+            data=payload["err_csv"],
+            file_name=payload["error_fname"],
+            mime="text/csv",
+        )
 
 # ─── FOOTER ──────────────────────────────────────────────────────────────────
 
