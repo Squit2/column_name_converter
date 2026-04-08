@@ -101,22 +101,37 @@ def validate_customer_config(config, config_name="<inline_config>"):
     return {"errors": errors, "warnings": warnings}
 
 def load_customer_config(customer_key):
-    config_path = MAPPINGS_DIR / f"{customer_key}.json"
+    config_path = MAPPINGS_DIR / f"{customer_key}.csv"
+    
     if not config_path.exists():
-        available = [p.stem for p in MAPPINGS_DIR.glob("*.json") if p.stem != "template"]
-        raise FileNotFoundError(
-            f"No config found for '{customer_key}'.\nAvailable: {available}\n"
-            f"Add a new customer by copying mappings/template.json"
-        )
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
+        raise FileNotFoundError(f"No CSV config found for '{customer_key}'.")
+
+    # Read the CSV using pandas
+    df_map = pd.read_csv(config_path)
+    
+    # Drop empty rows just in case someone left blank lines in Excel
+    df_map.dropna(how="all", inplace=True)
+    
+    # Convert the two columns into a dictionary: {"DocNo": "ORDER_REF"}
+    column_map = dict(zip(df_map.iloc[:, 0].astype(str).str.strip(), 
+                          df_map.iloc[:, 1].astype(str).str.strip()))
+
+    # Build the dictionary exactly as the rest of the app expects it
+    config = {
+        "customer_name": customer_key, # Use the file name as the customer name
+        "column_map": column_map
+    }
+
+    # Pass it through your existing validation
     report = validate_customer_config(config, config_path.name)
     if report["errors"]:
         raise ValueError("\n".join(report["errors"]))
+    
     config["_config_warnings"] = report["warnings"]
-    log.info(f"Loaded config: {config['customer_name']}")
+    log.info(f"Loaded CSV config: {config['customer_name']}")
+    
     return config
-
+    
 def list_customers():
     return [p.stem for p in MAPPINGS_DIR.glob("*.json") if p.stem != "template"]
 
