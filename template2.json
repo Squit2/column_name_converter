@@ -1,0 +1,24 @@
+{
+    "customer_name": "NEW CUSTOMER NAME",
+    "customer_code": "CUSTCODE",
+    "description": "Describe this customer and their file format here",
+    "column_map": {
+        "dih":            "ORDER_REF",
+        "dih2":          "ORDER_DATE",
+        "dih100":       "CUST_CODE",
+        "dih67":       "CUST_NAME",
+        "BranchCode":       "ADDRESS_NO",
+        "Location":         "ADDRESS1",
+        "ItemCode":         "PROD_CODE",
+        "Qty":              "ORIG_QTY_ORDERED",
+        "PackBy":           "ORIG_UOM_CODE",
+        "UnitPrice":        "AOPT_DEC_FIELD3",
+        "Discount":         "AOPT_DEC_FIELD4",
+        "BatchNo":          "LOT_NO",
+        "ProjNo":           "REMARKS2",
+        "PONo":             "CUST_PO",
+        "AccNo":            "AOPT_FIELD4",
+        "TaxCode":          "AOPT_FIELD5",
+        "Remarks":          "REMARKS"
+    }
+}
