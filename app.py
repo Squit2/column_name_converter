@@ -278,6 +278,11 @@ else:
     else:
         st.info("Fix config errors in mappings first, then upload a file.")
 
+import os
+st.write("cwd:", os.getcwd())
+st.write("mappings dir exists:", MAPPINGS_DIR.exists(), str(MAPPINGS_DIR))
+st.write("json files:", [p.name for p in MAPPINGS_DIR.glob("*.json")] if MAPPINGS_DIR.exists() else [])
+
 # ─── FOOTER ──────────────────────────────────────────────────────────────────
 
 st.divider()
