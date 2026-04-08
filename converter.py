@@ -10,7 +10,6 @@ import argparse
 from collections import Counter
 from pathlib import Path
 from datetime import datetime
-from difflib import get_close_matches
 
 import pandas as pd
 
@@ -156,15 +155,6 @@ def read_excel(file_path, sheet_name=0):
     return df
 
 # ─── STEP 3: APPLY MAPPING ───────────────────────────────────────────────────
-
-def _fuzzy_match(col_name, candidates, cutoff=0.6):
-    col_clean  = col_name.lower().replace("_", " ").replace("-", " ").strip()
-    cands_clean = [c.lower().replace("_", " ") for c in candidates]
-    matches = get_close_matches(col_clean, cands_clean, n=1, cutoff=cutoff)
-    if matches:
-        return candidates[cands_clean.index(matches[0])]
-    return None
-
 def apply_mapping(df, column_map, case_insensitive_source=True):
     warnings = []
     rename_map = {}
@@ -184,12 +174,7 @@ def apply_mapping(df, column_map, case_insensitive_source=True):
             )
             rename_map[col] = target
         else:
-            wms_field = _fuzzy_match(col, ALL_WMS_FIELDS)
-            if wms_field:
-                warnings.append(f"FUZZY MATCH: '{col}' auto-mapped to '{wms_field}'. Please verify.")
-                rename_map[col] = wms_field
-            else:
-                warnings.append(f"UNMAPPED: '{col}' could not be mapped and will be dropped.")
+            warnings.append(f"UNMAPPED: '{col}' could not be mapped and will be dropped.")
     df_mapped = df.rename(columns=rename_map)
     cols_present = [c for c in ALL_WMS_FIELDS if c in df_mapped.columns]
     return df_mapped[cols_present], warnings
