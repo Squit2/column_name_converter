@@ -159,6 +159,37 @@ def list_customers():
     return sorted(keys)
 
 
+def validate_all_customer_configs():
+    """
+    Attempt to load every customer config in the mappings/ directory
+    and return a report of errors and warnings for each.
+
+    Returns
+    -------
+    dict of {customer_key: {"errors": [...], "warnings": [...]}}
+    """
+    reports = {}
+    for customer_key in list_customers():
+        errors   = []
+        warnings = []
+        try:
+            config = load_customer_config(customer_key)
+            column_map = config["column_map"]
+
+            # Warn if any mandatory WMS fields have no mapping
+            mapped_wms_fields = set(column_map.values())
+            for field in MANDATORY_FIELDS:
+                if field not in mapped_wms_fields:
+                    warnings.append(
+                        f"Mandatory field '{field}' is not mapped in this config."
+                    )
+        except (FileNotFoundError, ValueError) as e:
+            errors.append(str(e))
+
+        reports[customer_key] = {"errors": errors, "warnings": warnings}
+    return reports
+
+
 # ─── STEP 2: READ EXCEL ──────────────────────────────────────────────────────
 
 def read_excel(file_path, sheet_name=0):
@@ -182,17 +213,46 @@ def read_excel(file_path, sheet_name=0):
 
 # ─── STEP 3: APPLY MAPPING ───────────────────────────────────────────────────
 
-def apply_mapping(df, column_map):
+def apply_mapping(df, column_map, case_insensitive_source=False):
+    """
+    Rename DataFrame columns from customer names to WMS standard names.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Raw customer dataframe.
+    column_map : dict
+        {customer_column: wms_field} from the config.
+    case_insensitive_source : bool
+        If True, incoming column names are matched to the config
+        case-insensitively. Useful when a customer file has inconsistent
+        casing (e.g. "docno" vs "DocNo"). Defaults to False.
+    """
     warnings = []
     rename_map = {}
-    for col in df.columns:
-        if col in column_map:
-            rename_map[col] = column_map[col]
-        else:
-            warnings.append(
-                f"UNMAPPED: '{col}' is not in the config and will be dropped. "
-                f"Add it to the config file if it is needed."
-            )
+
+    if case_insensitive_source:
+        # Build a lowercased lookup so "docno" matches "DocNo" in config
+        lower_map = {k.lower(): v for k, v in column_map.items()}
+        for col in df.columns:
+            wms_field = lower_map.get(col.lower())
+            if wms_field:
+                rename_map[col] = wms_field
+            else:
+                warnings.append(
+                    f"UNMAPPED: '{col}' is not in the config and will be dropped. "
+                    f"Add it to the config file if it is needed."
+                )
+    else:
+        for col in df.columns:
+            if col in column_map:
+                rename_map[col] = column_map[col]
+            else:
+                warnings.append(
+                    f"UNMAPPED: '{col}' is not in the config and will be dropped. "
+                    f"Add it to the config file if it is needed."
+                )
+
     df_mapped = df.rename(columns=rename_map)
     cols_present = [c for c in ALL_WMS_FIELDS if c in df_mapped.columns]
     return df_mapped[cols_present], warnings
