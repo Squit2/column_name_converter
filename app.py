@@ -81,6 +81,33 @@ def cached_validate_all_configs(mappings_fingerprint):
 
 with st.sidebar:
     st.header("Settings")
+
+    # ── Upload a new config file ─────────────────────────────────────────────
+    st.subheader("Upload config")
+    uploaded_config = st.file_uploader(
+        "Drop a customer config here (.csv or .xlsx)",
+        type=["csv", "xlsx"],
+        help=(
+            "Config must have two columns: customer_column and wms_field. "
+            "The filename becomes the customer key (e.g. acme_corp.csv → acme_corp)."
+        ),
+    )
+
+    if uploaded_config is not None:
+        config_dest = MAPPINGS_DIR / uploaded_config.name
+        if config_dest.stem == "template":
+            st.error("Cannot overwrite the template file. Rename your config and re-upload.")
+        elif config_dest.suffix.lower() not in (".csv", ".xlsx"):
+            st.error("Only .csv and .xlsx config files are accepted.")
+        else:
+            config_dest.write_bytes(uploaded_config.getvalue())
+            st.success(
+                f"Config saved: **{uploaded_config.name}**. "
+                f"Customer key: **{config_dest.stem}**"
+            )
+
+    st.divider()
+
     mappings_fingerprint = get_mappings_fingerprint()
 
     customers = cached_list_customers(mappings_fingerprint)
