@@ -4,10 +4,8 @@ converter.py
 WMS Order File Converter - Core Engine
 """
 
-import json
 import logging
 import argparse
-from collections import Counter
 from pathlib import Path
 from datetime import datetime
 
@@ -49,90 +47,117 @@ log = logging.getLogger(__name__)
 
 # ─── STEP 1: LOAD CONFIG ─────────────────────────────────────────────────────
 
-def _normalize_col_name(name):
-    return str(name).strip().lower()
-
-def validate_customer_config(config, config_name="<inline_config>"):
-    errors = []
-    warnings = []
-
-    if not isinstance(config, dict):
-        return {"errors": [f"Config '{config_name}' must be a JSON object."], "warnings": []}
-
-    required = {"customer_name", "column_map"}
-    missing = required - set(config.keys())
-    if missing:
-        errors.append(f"Config '{config_name}' missing keys: {sorted(missing)}")
-
-    column_map = config.get("column_map")
-    if not isinstance(column_map, dict) or not column_map:
-        errors.append(f"Config '{config_name}' must define non-empty 'column_map'.")
-        return {"errors": errors, "warnings": warnings}
-
-    invalid_targets = sorted({target for target in column_map.values() if target not in ALL_WMS_FIELDS})
-    if invalid_targets:
-        errors.append(
-            f"Config '{config_name}' has invalid WMS target field(s): {invalid_targets}"
-        )
-
-    counts = Counter(column_map.values())
-    duplicate_targets = sorted([target for target, count in counts.items() if count > 1])
-    if duplicate_targets:
-        warnings.append(
-            f"Config '{config_name}' maps multiple source columns to the same WMS field(s): {duplicate_targets}"
-        )
-
-    mapped_targets = set(column_map.values())
-    missing_mandatory = [field for field in MANDATORY_FIELDS if field not in mapped_targets]
-    if missing_mandatory:
-        warnings.append(
-            f"Config '{config_name}' does not map mandatory WMS field(s): {missing_mandatory}"
-        )
-
-    normalized_sources = [_normalize_col_name(src) for src in column_map.keys()]
-    duplicate_sources = sorted(
-        [source for source, count in Counter(normalized_sources).items() if count > 1]
-    )
-    if duplicate_sources:
-        warnings.append(
-            f"Config '{config_name}' has duplicate source column names after normalization: {duplicate_sources}"
-        )
-
-    return {"errors": errors, "warnings": warnings}
-
 def load_customer_config(customer_key):
-    config_path = MAPPINGS_DIR / f"{customer_key}.json"
-    if not config_path.exists():
-        available = [p.stem for p in MAPPINGS_DIR.glob("*.json") if p.stem != "template"]
+    """
+    Load a customer mapping config from the mappings/ directory.
+    Accepts .csv or .xlsx files with exactly two columns:
+        customer_column  — the column name as it appears in the customer's file
+        wms_field        — the WMS standard field it maps to
+
+    Example config (gigly_gulp.csv):
+        customer_column,wms_field
+        DocNo,ORDER_REF
+        DocDate,ORDER_DATE
+        DebtorCode,CUST_CODE
+        ...
+
+    Parameters
+    ----------
+    customer_key : str
+        Filename of the config without extension, e.g. "gigly_gulp"
+
+    Returns
+    -------
+    dict with keys:
+        customer_name : str   — derived from the config filename
+        column_map    : dict  — {customer_column: wms_field}
+    """
+    # Search for a matching .csv or .xlsx config file
+    config_path = None
+    for ext in (".csv", ".xlsx"):
+        candidate = MAPPINGS_DIR / f"{customer_key}{ext}"
+        if candidate.exists():
+            config_path = candidate
+            break
+
+    if config_path is None:
+        available = list_customers()
         raise FileNotFoundError(
-            f"No config found for '{customer_key}'.\nAvailable: {available}\n"
-            f"Add a new customer by copying mappings/template.json"
+            f"No config found for '{customer_key}' in '{MAPPINGS_DIR}'.\n"
+            f"Available customers: {available}\n"
+            f"Create a new config as mappings/{customer_key}.csv with columns: "
+            f"customer_column, wms_field"
         )
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
-    report = validate_customer_config(config, config_path.name)
-    if report["errors"]:
-        raise ValueError("\n".join(report["errors"]))
-    config["_config_warnings"] = report["warnings"]
-    log.info(f"Loaded config: {config['customer_name']}")
-    return config
+
+    # Read the config file into a dataframe
+    try:
+        if config_path.suffix.lower() == ".csv":
+            df_config = pd.read_csv(config_path, dtype=str)
+        else:
+            df_config = pd.read_excel(config_path, dtype=str)
+    except Exception as e:
+        raise ValueError(f"Could not read config file '{config_path.name}': {e}")
+
+    # Normalise column headers — strip whitespace and lowercase for robustness
+    df_config.columns = [c.strip().lower() for c in df_config.columns]
+
+    # Validate required columns exist
+    required_cols = {"customer_column", "wms_field"}
+    missing_cols  = required_cols - set(df_config.columns)
+    if missing_cols:
+        raise ValueError(
+            f"Config '{config_path.name}' is missing columns: {missing_cols}.\n"
+            f"Config must have exactly these column headers: customer_column, wms_field"
+        )
+
+    # Drop any rows where either column is blank
+    df_config = df_config.dropna(subset=["customer_column", "wms_field"])
+    df_config["customer_column"] = df_config["customer_column"].str.strip()
+    df_config["wms_field"]       = df_config["wms_field"].str.strip()
+    df_config = df_config[
+        (df_config["customer_column"] != "") &
+        (df_config["wms_field"]       != "")
+    ]
+
+    if df_config.empty:
+        raise ValueError(
+            f"Config '{config_path.name}' has no valid mapping rows."
+        )
+
+    # Validate all wms_field values are recognised WMS fields
+    invalid_fields = [
+        row["wms_field"] for _, row in df_config.iterrows()
+        if row["wms_field"] not in ALL_WMS_FIELDS
+    ]
+    if invalid_fields:
+        raise ValueError(
+            f"Config '{config_path.name}' contains unrecognised WMS fields: "
+            f"{invalid_fields}.\nValid WMS fields are: {ALL_WMS_FIELDS}"
+        )
+
+    # Build the column_map dict from the two columns
+    column_map    = dict(zip(df_config["customer_column"], df_config["wms_field"]))
+    customer_name = customer_key.replace("_", " ").title()
+
+    log.info(
+        f"Loaded config: '{config_path.name}' — "
+        f"{len(column_map)} column mapping(s) for {customer_name}"
+    )
+    return {
+        "customer_name": customer_name,
+        "column_map":    column_map,
+    }
+
 
 def list_customers():
-    return [p.stem for p in MAPPINGS_DIR.glob("*.json") if p.stem != "template"]
+    """Return all available customer keys (config filenames without extension)."""
+    keys = set()
+    for ext in ("*.csv", "*.xlsx"):
+        for p in MAPPINGS_DIR.glob(ext):
+            if p.stem != "template":
+                keys.add(p.stem)
+    return sorted(keys)
 
-def validate_all_customer_configs():
-    reports = {}
-    for customer_key in list_customers():
-        config_path = MAPPINGS_DIR / f"{customer_key}.json"
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
-            reports[customer_key] = validate_customer_config(config, config_path.name)
-        except json.JSONDecodeError as e:
-            reports[customer_key] = {"errors": [f"Invalid JSON in '{config_path.name}': {e}"], "warnings": []}
-        except Exception as e:
-            reports[customer_key] = {"errors": [str(e)], "warnings": []}
-    return reports
 
 # ─── STEP 2: READ EXCEL ──────────────────────────────────────────────────────
 
@@ -154,30 +179,24 @@ def read_excel(file_path, sheet_name=0):
     log.info(f"Read {len(df)} rows. Columns: {list(df.columns)}")
     return df
 
+
 # ─── STEP 3: APPLY MAPPING ───────────────────────────────────────────────────
-def apply_mapping(df, column_map, case_insensitive_source=True):
+
+def apply_mapping(df, column_map):
     warnings = []
     rename_map = {}
-    normalized_source_map = {}
-    if case_insensitive_source:
-        normalized_source_map = {
-            _normalize_col_name(src): target for src, target in column_map.items()
-        }
-
     for col in df.columns:
         if col in column_map:
             rename_map[col] = column_map[col]
-        elif case_insensitive_source and _normalize_col_name(col) in normalized_source_map:
-            target = normalized_source_map[_normalize_col_name(col)]
-            warnings.append(
-                f"CASE-NORMALIZED MATCH: '{col}' mapped to '{target}' via normalized source-column name."
-            )
-            rename_map[col] = target
         else:
-            warnings.append(f"UNMAPPED: '{col}' could not be mapped and will be dropped.")
+            warnings.append(
+                f"UNMAPPED: '{col}' is not in the config and will be dropped. "
+                f"Add it to the config file if it is needed."
+            )
     df_mapped = df.rename(columns=rename_map)
     cols_present = [c for c in ALL_WMS_FIELDS if c in df_mapped.columns]
     return df_mapped[cols_present], warnings
+
 
 # ─── STEP 4: VALIDATE ────────────────────────────────────────────────────────
 
@@ -215,7 +234,9 @@ def validate(df):
     df_errors = df.loc[error_indices].copy() if error_indices else pd.DataFrame()
     if not df_errors.empty:
         df_errors = df_errors.copy()
-        df_errors["VALIDATION_ERRORS"] = df_errors.index.map(lambda i: " | ".join(row_errors[i]))
+        df_errors["VALIDATION_ERRORS"] = df_errors.index.map(
+            lambda i: " | ".join(row_errors[i])
+        )
 
     if row_errors:
         error_messages.append(
@@ -225,11 +246,12 @@ def validate(df):
     log.info(f"Validation: {len(df_valid)} valid, {len(df_errors)} errors.")
     return df_valid, df_errors, error_messages
 
+
 # ─── STEP 5: CLEAN DATA ──────────────────────────────────────────────────────
 
 def clean_data(df):
     df = df.copy()
-    for col in df.select_dtypes(include=["object", "string"]).columns:
+    for col in df.select_dtypes(include="object").columns:
         df[col] = df[col].astype(str).str.strip().replace("nan", "")
     if "ORDER_DATE" in df.columns:
         df["ORDER_DATE"] = pd.to_datetime(
@@ -248,6 +270,7 @@ def clean_data(df):
         )
     return df
 
+
 # ─── STEP 6: EXPORT ──────────────────────────────────────────────────────────
 
 def export_csv(df, customer_key, output_dir=OUTPUT_DIR):
@@ -259,6 +282,7 @@ def export_csv(df, customer_key, output_dir=OUTPUT_DIR):
     log.info(f"Exported {len(df)} rows to '{out_path}'")
     return out_path
 
+
 def export_error_report(df_errors, customer_key, output_dir=OUTPUT_DIR):
     if df_errors.empty:
         return None
@@ -268,6 +292,7 @@ def export_error_report(df_errors, customer_key, output_dir=OUTPUT_DIR):
     df_errors.to_csv(out_path, index=False, encoding="utf-8-sig")
     log.warning(f"Error report: '{out_path}'")
     return out_path
+
 
 # ─── MAIN PIPELINE ───────────────────────────────────────────────────────────
 
@@ -319,19 +344,22 @@ def run_conversion(file_path, customer_key, sheet_name=0, auto_confirm=False, ou
         log.error(str(e))
     return result
 
+
 # ─── CLI ─────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="WMS Order File Converter")
-    parser.add_argument("--file",     "-f", required=True)
-    parser.add_argument("--customer", "-c", required=True)
-    parser.add_argument("--sheet",    "-s", default=0)
-    parser.add_argument("--yes",      "-y", action="store_true")
+    parser.add_argument("--file",     "-f", required=True,
+                        help="Path to the customer Excel file (.xlsx)")
+    parser.add_argument("--customer", "-c", required=True,
+                        help=f"Customer config key. Available: {list_customers()}")
+    parser.add_argument("--sheet",    "-s", default=0,
+                        help="Sheet name or index (default: 0 = first sheet)")
+    parser.add_argument("--yes",      "-y", action="store_true",
+                        help="Skip manual review prompt and export immediately")
     args = parser.parse_args()
 
-    # Support both sheet index ("0", "1", ...) and sheet name.
-    sheet = int(args.sheet) if str(args.sheet).isdigit() else args.sheet
-    result = run_conversion(args.file, args.customer, sheet, args.yes)
+    result = run_conversion(args.file, args.customer, args.sheet, args.yes)
     print("\n" + "="*60)
     print("RESULT:", "SUCCESS" if result["success"] else "FAILED")
     print(f"Valid rows : {result['valid_rows']}")
