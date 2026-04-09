@@ -335,7 +335,7 @@ def clean_data(df):
 
 def export_csv(df, customer_key, output_dir=OUTPUT_DIR):
     ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"wms_output_{customer_key}_{ts}.csv"
+    filename = f"{customer_key}_{ts}.csv"
     out_path = output_dir / filename
     cols     = [c for c in ALL_WMS_FIELDS if c in df.columns]
     df[cols].to_csv(out_path, index=False, encoding="utf-8-sig")
