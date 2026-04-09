@@ -51,9 +51,13 @@ if "export_payload" not in st.session_state:
     st.session_state["export_payload"] = None
 
 def get_mappings_fingerprint():
-    json_files = sorted(MAPPINGS_DIR.glob("*.json"))
+    config_files = sorted(
+        p for ext in ("*.csv", "*.xlsx")
+        for p in MAPPINGS_DIR.glob(ext)
+        if p.stem != "template"
+    )
     fingerprint_parts = []
-    for file_path in json_files:
+    for file_path in config_files:
         stat = file_path.stat()
         fingerprint_parts.append(f"{file_path.name}:{stat.st_mtime_ns}:{stat.st_size}")
     return "|".join(fingerprint_parts)
@@ -297,5 +301,5 @@ if payload:
 st.divider()
 st.caption(
     "WMS Order File Converter | WMS Department | "
-    "To add a new customer, copy mappings/template.json and fill in the column_map."
+    "To add a new customer, copy mappings/template.csv and fill in customer_column / wms_field."
 )
