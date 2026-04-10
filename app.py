@@ -104,6 +104,21 @@ def cached_validate_all_configs(fingerprint: str):
 
 with st.sidebar:
     st.header("Settings")
+ 
+    physical_files = list(MAPPINGS_DIR.glob("*.*"))
+    st.write(f"**Found {len(physical_files)} file(s):**")
+    for f in physical_files:
+        st.code(f.name)
+        
+    if st.button("🚨 NUKE ALL CONFIGS 🚨", type="primary"):
+        deleted_count = 0
+        for f in physical_files:
+            # Protect the template, delete everything else
+            if f.stem != "template":
+                f.unlink(missing_ok=True)
+                deleted_count += 1
+        st.success(f"Successfully vaporized {deleted_count} ghost files. Refresh the page!")
+    st.divider()
 
     # ── Upload a new config file ─────────────────────────────────────────────
     st.subheader("Upload config")
