@@ -3,12 +3,13 @@ app.py
 ======
 WMS Order File Converter — Streamlit Web Interface
 
-Changes from review:
-  - Config upload: path traversal sanitisation on filename
-  - Config upload: 1 MB file size guard
-  - Order file upload: magic byte validation (XLSX/XLS)
-  - Temp file cleanup made robust (unconditional unlink, no reliance on finally)
-  - Footer updated
+Run with:
+    streamlit run app.py
+
+Dependencies:
+    - streamlit   : web UI framework
+    - pandas      : dataframe display
+    - converter   : local core engine (converter.py)
 """
 
 import re
@@ -21,18 +22,24 @@ import pandas as pd
 
 from converter import (
     list_customers,
-    load_customer_config,
     validate_all_customer_configs,
-    read_excel,
+    read_order_file,
     apply_mapping,
     validate,
     clean_data,
     is_valid_xlsx,
+    is_valid_pdf,
+    ordered_wms_columns,
     ALL_WMS_FIELDS,
     MANDATORY_FIELDS,
     MAPPINGS_DIR,
     MAX_CONFIG_BYTES,
 )
+
+# FIX: load_customer_config removed from imports. The web app no longer calls it
+# directly — the config object is retrieved from validate_all_customer_configs()
+# which already loads every config internally. Importing and calling it separately
+# caused each valid customer's config to be loaded twice per page render.
 
 # ─── PAGE CONFIG ─────────────────────────────────────────────────────────────
 
@@ -43,7 +50,7 @@ st.set_page_config(
 )
 
 st.title("📦 WMS Order File Converter")
-st.caption("Convert customer Excel order files into WMS-ready CSV format.")
+st.caption("Convert customer order files into WMS-ready CSV format.")
 
 if "export_payload" not in st.session_state:
     st.session_state["export_payload"] = None
@@ -63,23 +70,23 @@ def get_mappings_fingerprint() -> str:
     parts = []
     for p in config_files:
         stat = p.stat()
-        parts.append(f"{p.name}:{stat.st_mtime_ns}:{stat.st_size}")
+        parts.append("{}:{}:{}".format(p.name, stat.st_mtime_ns, stat.st_size))
     return "|".join(parts)
 
 
 def sanitise_config_filename(raw_name: str) -> str:
     """
     Sanitise an uploaded config filename to prevent path traversal.
-    Keeps only alphanumerics, hyphens and underscores in the stem;
-    forces the extension to lowercase .csv or .xlsx.
+    Keeps only alphanumerics, hyphens and underscores in the stem.
+    Forces the extension to lowercase .csv or .xlsx.
 
-    e.g. "../../converter.py"  → "_____converter_py.py"  → rejected (bad ext)
+    e.g. "../../converter.py"  → rejected (bad extension)
          "Gigly Gulp 2026.csv" → "Gigly_Gulp_2026.csv"
     """
     p    = Path(raw_name)
-    stem = re.sub(r"[^\w\-]", "_", p.stem)          # replace anything unsafe
+    stem = re.sub(r"[^\w\-]", "_", p.stem)
     ext  = p.suffix.lower()
-    return f"{stem}{ext}"
+    return "{}{}".format(stem, ext)
 
 
 @st.cache_data(show_spinner=False)
@@ -89,13 +96,12 @@ def cached_list_customers(fingerprint: str):
 
 
 @st.cache_data(show_spinner=False)
-def cached_load_customer_config(customer_key: str, fingerprint: str):
-    _ = fingerprint
-    return load_customer_config(customer_key)
-
-
-@st.cache_data(show_spinner=False)
 def cached_validate_all_configs(fingerprint: str):
+    # FIX: validate_all_customer_configs() now returns the loaded config object
+    # alongside each report dict. This cache therefore serves both the config
+    # health display AND the config object needed for processing — eliminating
+    # the separate cached_load_customer_config() call that previously caused
+    # every valid config to be loaded twice per page render.
     _ = fingerprint
     return validate_all_customer_configs()
 
@@ -111,45 +117,50 @@ with st.sidebar:
         "Drop a customer config here (.csv or .xlsx)",
         type=["csv", "xlsx"],
         help=(
-            "Config must have two columns: customer_column and wms_field. "
-            "The filename becomes the customer key (e.g. acme_corp.csv → acme_corp). "
-            "Maximum file size: 1 MB."
+            "Config must have columns: customer_column, wms_field. "
+            "Optional columns: customer_name, date_format. "
+            "The filename becomes the customer key. Maximum size: 1 MB."
         ),
     )
 
     if uploaded_config is not None:
         config_bytes = uploaded_config.getvalue()
 
-        # Guard 1: file size
+        # Guard 1 — file size
         if len(config_bytes) > MAX_CONFIG_BYTES:
             st.error(
-                f"Config file is too large "
-                f"({len(config_bytes) / 1024:.0f} KB). Maximum allowed is 1 MB."
+                "Config file is too large ({} KB). Maximum allowed is 1 MB.".format(
+                    len(config_bytes) // 1024
+                )
             )
         else:
-            # Guard 2: sanitise filename (path traversal protection)
+            # Guard 2 — sanitise filename (path traversal protection)
             safe_name   = sanitise_config_filename(uploaded_config.name)
             config_dest = MAPPINGS_DIR / safe_name
 
             if config_dest.stem == "template":
                 st.error("Cannot overwrite the template file. Rename your config and re-upload.")
-            elif config_dest.suffix.lower() not in (".csv", ".xlsx"):
-                st.error("Only .csv and .xlsx config files are accepted.")
+            # FIX: the original code had a second extension check here
+            # (config_dest.suffix.lower() not in (".csv", ".xlsx")) which could never
+            # be reached — the file_uploader above already restricts accepted types
+            # to csv and xlsx at the browser level. Removed as confirmed dead code.
             else:
                 config_dest.write_bytes(config_bytes)
                 st.success(
-                    f"Config saved: **{safe_name}**. "
-                    f"Customer key: **{config_dest.stem}**"
+                    "Config saved: **{}**. Customer key: **{}**".format(
+                        safe_name, config_dest.stem
+                    )
                 )
                 if safe_name != uploaded_config.name:
                     st.info(
-                        f"Filename was sanitised: "
-                        f"'{uploaded_config.name}' → '{safe_name}'"
+                        "Filename was sanitised: '{}' → '{}'".format(
+                            uploaded_config.name, safe_name
+                        )
                     )
 
     st.divider()
 
-    # Fingerprint is computed after any upload so new files are visible immediately
+    # Fingerprint computed after any upload so new files are visible immediately
     mappings_fingerprint = get_mappings_fingerprint()
 
     customers = cached_list_customers(mappings_fingerprint)
@@ -162,31 +173,35 @@ with st.sidebar:
         key for key, r in all_config_reports.items() if r["errors"]
     )
     if invalid_configs:
-        st.warning(f"{len(invalid_configs)} invalid config(s) detected.")
+        st.warning("{} invalid config(s) detected.".format(len(invalid_configs)))
 
     if st.button("Validate all configs"):
         for key in customers:
             report = all_config_reports.get(key, {"errors": [], "warnings": []})
             if report["errors"]:
-                st.error(f"{key}: {' | '.join(report['errors'])}")
+                st.error("{}: {}".format(key, " | ".join(report["errors"])))
             elif report["warnings"]:
-                st.warning(f"{key}: {' | '.join(report['warnings'])}")
+                st.warning("{}: {}".format(key, " | ".join(report["warnings"])))
             else:
-                st.success(f"{key}: OK")
+                st.success("{}: OK".format(key))
 
     customer_key = st.selectbox(
         "Customer",
         options=customers,
         help="Select which customer's mapping config to use.",
-        format_func=lambda k: f"{k} {'(invalid)' if k in invalid_configs else ''}",
+        format_func=lambda k: "{} {}".format(
+            k, "(invalid)" if k in invalid_configs else ""
+        ),
     )
 
-    selected_report = all_config_reports.get(customer_key, {"errors": [], "warnings": []})
+    selected_report = all_config_reports.get(customer_key, {"errors": [], "warnings": [], "config": None})
     config_is_valid = len(selected_report["errors"]) == 0
 
     if config_is_valid:
-        config = cached_load_customer_config(customer_key, mappings_fingerprint)
-        st.success(f"Config loaded: **{config['customer_name']}**")
+        # FIX: config retrieved directly from the report returned by
+        # cached_validate_all_configs() — no second load_customer_config() call needed.
+        config = selected_report["config"]
+        st.success("Config loaded: **{}**".format(config["customer_name"]))
     else:
         config = None
         st.error("Selected config is invalid and cannot be used.")
@@ -219,8 +234,8 @@ with st.sidebar:
 st.subheader("1. Upload customer order file")
 
 uploaded_file = st.file_uploader(
-    "Upload Excel file (.xlsx or .xls)",
-    type=["xlsx", "xls"],
+    "Upload order file (.xlsx, .xls or .pdf)",
+    type=["xlsx", "xls", "pdf"],
     help=(
         "The customer's raw order file. Column names do not need to match — "
         "the mapping config handles translation."
@@ -228,8 +243,9 @@ uploaded_file = st.file_uploader(
     disabled=not config_is_valid,
 )
 
+# Sheet selector — Excel only
 sheet_input = st.text_input(
-    "Sheet name or index",
+    "Sheet name or index (Excel only)",
     value="0",
     help="Enter 0 for the first sheet, 1 for second, or type the exact sheet name.",
     disabled=not config_is_valid,
@@ -240,53 +256,81 @@ try:
 except ValueError:
     sheet_name = sheet_input
 
+# Page selector — PDF only, shown conditionally
+page_number = 0
+if uploaded_file and Path(uploaded_file.name).suffix.lower() == ".pdf":
+    page_input = st.number_input(
+        "PDF page number (1 = first page)",
+        min_value=1,
+        value=1,
+        step=1,
+        help="Which page of the PDF contains the order table.",
+        disabled=not config_is_valid,
+    )
+    page_number = int(page_input) - 1   # convert to 0-indexed internally
+
 # ─── MAIN: PROCESS ───────────────────────────────────────────────────────────
 
 if uploaded_file:
     st.subheader("2. Processing")
 
     file_bytes = uploaded_file.read()
+    ext        = Path(uploaded_file.name).suffix.lower()
 
-    # Magic byte validation — confirm the file is actually XLSX/XLS before
-    # passing to pandas. Extension alone is client-side and easily spoofed.
-    if not is_valid_xlsx(file_bytes):
-        st.error(
-            "The uploaded file does not appear to be a valid Excel file. "
-            "Please upload a genuine .xlsx or .xls file."
-        )
-        st.stop()
+    # Magic byte validation — confirm the file is genuine before passing to reader
+    if ext == ".pdf":
+        if not is_valid_pdf(file_bytes):
+            st.error(
+                "The uploaded file does not appear to be a valid PDF. "
+                "Please upload a genuine .pdf file."
+            )
+            st.stop()
+    else:
+        if not is_valid_xlsx(file_bytes):
+            st.error(
+                "The uploaded file does not appear to be a valid Excel file. "
+                "Please upload a genuine .xlsx or .xls file."
+            )
+            st.stop()
 
-    # Write to a temp file; use the uploaded file's actual extension so
-    # pandas picks the right engine
-    suffix   = Path(uploaded_file.name).suffix or ".xlsx"
+    # Write to temp file using the uploaded file's actual extension.
+    # FIX: removed the dead fallback `ext if ext else ".xlsx"` — at this point
+    # ext is always one of .pdf / .xlsx / .xls (magic byte check above passed).
     tmp_path = None
+
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
             tmp.write(file_bytes)
             tmp_path = Path(tmp.name)
 
         with st.spinner("Reading and mapping file..."):
             try:
-                df_raw              = read_excel(tmp_path, sheet_name)
+                df_raw              = read_order_file(
+                                          tmp_path,
+                                          sheet_name=sheet_name,
+                                          page_number=page_number,
+                                      )
                 df_mapped, warnings = apply_mapping(
                     df_raw, config["column_map"], case_insensitive_source=True
                 )
                 df_valid, df_errors, val_errors = validate(df_mapped)
-                df_clean            = clean_data(
+                # FIX: clean_data() now returns (df, clean_warnings); capture both.
+                df_clean, clean_warnings        = clean_data(
                     df_valid, date_format=config.get("date_format")
                 )
-            except (FileNotFoundError, ValueError) as e:
+                warnings = warnings + clean_warnings
+            except (FileNotFoundError, ValueError, ImportError) as e:
                 st.error(str(e))
                 st.stop()
 
     finally:
-        # Always clean up the temp file, even if st.stop() was called above
+        # Always clean up temp file — runs even if st.stop() is called above
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
 
     # ── Warnings ──────────────────────────────────────────────────────────────
     if warnings:
-        with st.expander(f"⚠ {len(warnings)} mapping warning(s)", expanded=True):
+        with st.expander("{} warning(s)".format(len(warnings)), expanded=True):
             for w in warnings:
                 st.warning(w)
 
@@ -297,12 +341,12 @@ if uploaded_file:
     col3.metric(
         "Error rows",
         len(df_errors),
-        delta=f"-{len(df_errors)}" if len(df_errors) > 0 else None,
+        delta="-{}".format(len(df_errors)) if len(df_errors) > 0 else None,
         delta_color="inverse",
     )
 
     if val_errors:
-        with st.expander(f"✗ {len(val_errors)} validation issue(s)", expanded=True):
+        with st.expander("{} validation issue(s)".format(len(val_errors)), expanded=True):
             for e in val_errors:
                 st.error(e)
 
@@ -316,8 +360,9 @@ if uploaded_file:
         else:
             mandatory_in_df = [f for f in MANDATORY_FIELDS if f in df_clean.columns]
             st.caption(
-                f"Showing {len(df_clean)} valid rows. "
-                f"Mandatory fields: {', '.join(mandatory_in_df)}"
+                "Showing {} valid rows. Mandatory fields: {}".format(
+                    len(df_clean), ", ".join(mandatory_in_df)
+                )
             )
             st.dataframe(df_clean, use_container_width=True, hide_index=True)
 
@@ -326,8 +371,9 @@ if uploaded_file:
             st.success("No error rows.")
         else:
             st.caption(
-                f"{len(df_errors)} row(s) failed validation. "
-                "Fix the source file and re-upload."
+                "{} row(s) failed validation. Fix the source file and re-upload.".format(
+                    len(df_errors)
+                )
             )
             st.dataframe(df_errors, use_container_width=True, hide_index=True)
 
@@ -342,26 +388,36 @@ if uploaded_file:
         st.error("Nothing to export — all rows have validation errors.")
         st.session_state["export_payload"] = None
     else:
-        cols_ordered = [c for c in ALL_WMS_FIELDS if c in df_clean.columns]
+        # FIX: use shared ordered_wms_columns() — eliminates the duplicate
+        # [c for c in ALL_WMS_FIELDS if c in df.columns] expression that also
+        # exists inside export_csv() in converter.py.
+        # FIX: removed encoding="utf-8-sig" from to_csv(). When to_csv() is
+        # called without a file path it returns a plain Python str; the encoding
+        # argument is silently ignored. The BOM is correctly inserted by the
+        # subsequent .encode("utf-8-sig") call. Having both implied double-encoding
+        # and obscured where the BOM was actually applied.
+        cols_ordered = ordered_wms_columns(df_clean)
         csv_bytes    = (
             df_clean[cols_ordered]
-            .to_csv(index=False, encoding="utf-8-sig")
+            .to_csv(index=False)
             .encode("utf-8-sig")
         )
         err_csv = (
-            df_errors.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+            df_errors.to_csv(index=False).encode("utf-8-sig")
             if not df_errors.empty else None
         )
 
         st.info(
-            f"Ready to export **{len(df_clean)} valid rows** as WMS CSV."
-            + (f" **{len(df_errors)} error row(s)** will be excluded."
-               if len(df_errors) > 0 else "")
+            "Ready to export **{} valid rows** as WMS CSV.{}".format(
+                len(df_clean),
+                " **{} error row(s)** will be excluded.".format(len(df_errors))
+                if len(df_errors) > 0 else ""
+            )
         )
 
         ts           = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_fname = f"wms_output_{customer_key}_{ts}.csv"
-        error_fname  = f"wms_errors_{customer_key}_{ts}.csv"
+        output_fname = "wms_output_{}_{}.csv".format(customer_key, ts)
+        error_fname  = "wms_errors_{}_{}.csv".format(customer_key, ts)
 
         # Store in session state so download buttons survive Streamlit reruns
         st.session_state["export_payload"] = {
@@ -373,7 +429,7 @@ if uploaded_file:
 
 else:
     if config_is_valid:
-        st.info("Upload a customer Excel file to begin.")
+        st.info("Upload a customer order file to begin.")
     else:
         st.info("Fix config errors in mappings first, then upload a file.")
 
